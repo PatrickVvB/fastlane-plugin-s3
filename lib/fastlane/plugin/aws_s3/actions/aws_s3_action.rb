@@ -10,6 +10,7 @@ module Fastlane
   module Actions
     module SharedValues
       S3_APK_OUTPUT_PATH ||= :S3_APK_OUTPUT_PATH
+      S3_AAB_OUTPUT_PATH ||= :S3_AAB_OUTPUT_PATH
       S3_IPA_OUTPUT_PATH ||= :S3_IPA_OUTPUT_PATH
       S3_DSYM_OUTPUT_PATH ||= :S3_DSYM_OUTPUT_PATH
       S3_PLIST_OUTPUT_PATH ||= :S3_PLIST_OUTPUT_PATH
@@ -26,6 +27,7 @@ module Fastlane
         # Calling fetch on config so that default values will be used
         params = {}
         params[:apk] = config[:apk]
+        params[:aab] = config[:aab]
         params[:ipa] = config[:ipa]
         params[:xcarchive] = config[:xcarchive]
         params[:dsym] = config[:dsym]
@@ -71,6 +73,7 @@ module Fastlane
         s3_bucket = params[:bucket]
         s3_endpoint = params[:endpoint]
         apk_file = params[:apk]
+        aab_file = params[:aab]
         ipa_file = params[:ipa]
         release_notes = params[:release_notes]
         xcarchive_file = params[:xcarchive]
@@ -82,8 +85,8 @@ module Fastlane
         server_side_encryption = params[:server_side_encryption]
 
         UI.user_error!("No S3 bucket given, pass using `bucket: 'bucket'`") unless s3_bucket.to_s.length > 0
-        UI.user_error!("No IPA, APK file, folder or files paths given, pass using `ipa: 'ipa path'` or `apk: 'apk path'` or `folder: 'folder path' or files: [`file path1`, `file path 2`]") if ipa_file.to_s.length == 0 && apk_file.to_s.length == 0 && files.to_a.count == 0 && folder.to_s.length == 0
-        UI.user_error!("Please only give IPA path or APK path (not both)") if ipa_file.to_s.length > 0 && apk_file.to_s.length > 0
+        UI.user_error!("No IPA, APK, AAB file, folder or files paths given, pass using `ipa: 'ipa path'` or `apk: 'apk path'` or `aab: 'aab path'` or `folder: 'folder path' or files: [`file path1`, `file path 2`]") if ipa_file.to_s.length == 0 && apk_file.to_s.length == 0 && aab_file.to_s.length == 0 && files.to_a.count == 0 && folder.to_s.length == 0
+        UI.user_error!("Please only give IPA path or APK path or AAB path") if (ipa_file.to_s.length > 0 && apk_file.to_s.length > 0) || (ipa_file.to_s.length > 0 && aab_file.to_s.length > 0) || (aab_file.to_s.length > 0 && apk_file.to_s.length > 0)
 
         require 'aws-sdk-s3'
 
@@ -101,6 +104,7 @@ module Fastlane
 
         upload_ipa(s3_client, params, s3_region, s3_access_key, s3_secret_access_key, s3_bucket, ipa_file, dsym_file, release_notes, s3_path, acl, server_side_encryption) if ipa_file.to_s.length > 0
         upload_apk(s3_client, params, s3_region, s3_access_key, s3_secret_access_key, s3_bucket, apk_file, release_notes, s3_path, acl, server_side_encryption) if apk_file.to_s.length > 0
+        upload_aab(s3_client, params, s3_region, s3_access_key, s3_secret_access_key, s3_bucket, aab_file, release_notes, s3_path, acl, server_side_encryption) if aab_file.to_s.length > 0
         upload_xcarchive(s3_client, params, s3_region, s3_access_key, s3_secret_access_key, s3_bucket, ipa_file, xcarchive_file, s3_path, acl, server_side_encryption) if xcarchive_file.to_s.length > 0
         upload_files(s3_client, params, s3_region, s3_access_key, s3_secret_access_key, s3_bucket, files, s3_path, acl, server_side_encryption) if files.to_a.count > 0
         upload_folder(s3_client, params, s3_region, s3_access_key, s3_secret_access_key, s3_bucket, folder, s3_path, acl, server_side_encryption) if folder.to_s.length > 0
@@ -450,6 +454,136 @@ module Fastlane
         UI.success("Android app can be downloaded at '#{Actions.lane_context[SharedValues::S3_HTML_OUTPUT_PATH]}'") unless skip_html
       end
 
+      def self.upload_aab(s3_client, params, s3_region, s3_access_key, s3_secret_access_key, s3_bucket, aab_file, release_notes, s3_path, acl, server_side_encryption)
+        version = get_aab_version("base/manifest/#{aab_file}")
+
+        version_code = version[0]
+        version_name = version[1]
+        title = version[2]
+
+        s3_path = "v{version_name}_b{version_code}/" unless s3_path
+
+        app_directory = params[:app_directory]
+
+        html_template_path = params[:html_template_path]
+        html_template_params = params[:html_template_params] || {}
+        html_file_name = params[:html_file_name]
+        generate_html_in_folder = params[:html_in_folder]
+        generate_html_in_root = params[:html_in_root]
+        generate_version_in_folder = params[:version_in_folder]
+        generate_version_in_root = params[:version_in_root]
+        version_template_path = params[:version_template_path]
+        version_template_params = params[:version_template_params] || {}
+        version_file_name = params[:version_file_name]
+        override_file_name = params[:override_file_name]
+        download_endpoint = params[:download_endpoint]
+        download_endpoint_replacement_regex = params[:download_endpoint_replacement_regex]
+
+        url_part = self.expand_path_with_substitutions_with_versions(version_code, version_name, s3_path)
+
+        aab_file_basename = File.basename(aab_file)
+        aab_file_name = "#{url_part}#{override_file_name ? override_file_name : aab_file_basename}"
+        aab_file_data = File.open(aab_file, 'rb')
+
+        aab_url = self.upload_file(s3_client, s3_bucket, app_directory, aab_file_name, aab_file_data, acl, server_side_encryption, download_endpoint, download_endpoint_replacement_regex)
+
+        # Setting action and environment variables
+        Actions.lane_context[SharedValues::S3_AAB_OUTPUT_PATH] = aab_url
+        ENV[SharedValues::S3_AAB_OUTPUT_PATH.to_s] = aab_url
+
+        if params[:upload_metadata] == false
+          return true
+        end
+
+        #####################################
+        #
+        # html and plist building
+        #
+        #####################################
+
+        html_file_name ||= "index.html"
+
+        version_file_name ||= "version.json"
+        # grabs module
+        eth = Fastlane::Helper::AwsS3Helper
+
+        # Creates html from template
+        if html_template_path && File.exist?(html_template_path)
+          html_template = eth.load_from_path(html_template_path)
+        else
+          html_template = eth.load("s3_android_html_template")
+        end
+        html_render = eth.render(html_template, {
+          aab_url: aab_url,
+          version_code: version_code,
+          version_name: version_name,
+          title: title,
+          release_notes: release_notes
+        }.merge(html_template_params))
+
+        # Creates version from template
+        if version_template_path && File.exist?(version_template_path)
+          version_template = eth.load_from_path(version_template_path)
+        else
+          version_template = eth.load("s3_android_version_template")
+        end
+        version_render = eth.render(version_template, {
+          aab_url: aab_url,
+          version_code: version_code,
+          version_name: version_name,
+          full_version: "#{version_code}_#{version_name}",
+          release_notes: release_notes
+        }.merge(version_template_params))
+
+        #####################################
+        #
+        # html and plist uploading
+        #
+        #####################################
+
+        skip_html = params[:skip_html_upload]
+
+        html_file_names = []
+        version_file_names = []
+
+        unless skip_html
+          if generate_html_in_root
+            html_file_names << html_file_name
+          end
+          if generate_html_in_folder
+            html_file_names << "#{url_part}#{html_file_name}"
+          end
+        end
+        if generate_version_in_root
+          version_file_names << version_file_name
+        end
+        if generate_version_in_folder
+          version_file_names << "#{url_part}#{version_file_name}"
+        end
+
+        html_url = nil
+        version_url = nil
+
+        html_file_names.each do |html_file_name|
+          html_url = self.upload_file(s3_client, s3_bucket, app_directory, html_file_name, html_render, acl, server_side_encryption, download_endpoint, download_endpoint_replacement_regex)
+        end
+
+        version_file_names.each do |version_file_name|
+          version_url = self.upload_file(s3_client, s3_bucket, app_directory, version_file_name, version_render, acl, server_side_encryption, download_endpoint, download_endpoint_replacement_regex)
+        end
+
+        Actions.lane_context[SharedValues::S3_HTML_OUTPUT_PATH] = html_url unless skip_html
+        ENV[SharedValues::S3_HTML_OUTPUT_PATH.to_s] = html_url unless skip_html
+
+        Actions.lane_context[SharedValues::S3_VERSION_OUTPUT_PATH] = version_url
+        ENV[SharedValues::S3_VERSION_OUTPUT_PATH.to_s] = version_url
+
+        self.upload_source(s3_client, params, s3_bucket, params[:source], s3_path, acl, server_side_encryption)
+
+        UI.success("Successfully uploaded aab file to '#{Actions.lane_context[SharedValues::S3_AAB_OUTPUT_PATH]}'")
+        UI.success("Android app can be downloaded at '#{Actions.lane_context[SharedValues::S3_HTML_OUTPUT_PATH]}'") unless skip_html
+      end
+
       def self.upload_source(s3_client, params, s3_bucket, source_directory, s3_path, acl, server_side_encryption)
         if source_directory && File.directory?(source_directory)
           source_directory = File.absolute_path source_directory
@@ -639,6 +773,11 @@ module Fastlane
                                        description: ".apk file for the build ",
                                        optional: true,
                                        default_value: Actions.lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH]),
+          FastlaneCore::ConfigItem.new(key: :aab,
+                                       env_name: "",
+                                       description: ".aab file for the build ",
+                                       optional: true,
+                                       default_value: Actions.lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH]),
           FastlaneCore::ConfigItem.new(key: :ipa,
                                        env_name: "",
                                        description: ".ipa file for the build ",
@@ -797,7 +936,7 @@ module Fastlane
                                        default_value: '^https?://[^/]*'),
           FastlaneCore::ConfigItem.new(key: :override_file_name,
                                        env_name: "",
-                                       description: "Optional override ipa/apk uploaded file name",
+                                       description: "Optional override ipa/apk/aab uploaded file name",
                                        optional: true,
                                        default_value: nil),
           FastlaneCore::ConfigItem.new(key: :files,
@@ -818,6 +957,7 @@ module Fastlane
       def self.output
         [
           ['S3_APK_OUTPUT_PATH', 'Direct HTTP link to the uploaded apk file'],
+          ['S3_AAB_OUTPUT_PATH', 'Direct HTTP link to the uploaded aab file'],
           ['S3_IPA_OUTPUT_PATH', 'Direct HTTP link to the uploaded ipa file'],
           ['S3_XCARCHIVE_OUTPUT_PATH', 'Direct HTTP link to the uploaded xcarchive file '],
           ['S3_DSYM_OUTPUT_PATH', 'Direct HTTP link to the uploaded dsym file'],
